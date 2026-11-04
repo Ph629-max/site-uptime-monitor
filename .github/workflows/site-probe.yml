@@ -54,6 +54,12 @@ jobs:
           PATHS=(/ /about /status /docs/ /robots.txt /sitemap.xml)
 
           echo "runner=$RUNNER_OS target=$TARGET"
+
+          # 三个 runner 错开出发（0–90 秒），避免三路请求同时到达、
+          # 形成一眼可辨的机器规律
+          stagger=$((RANDOM % 90))
+          echo "stagger ${stagger}s"
+          sleep $stagger
           for path in "${PATHS[@]}"; do
             ua="${UAS[$((RANDOM % ${#UAS[@]}))]}"
             code=$(curl -sS -o /dev/null -w '%{http_code}' \
