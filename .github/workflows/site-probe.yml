@@ -1,0 +1,82 @@
+# =============================================================================
+# 外部探针 · GitHub Actions
+#
+# 放到任意仓库的 .github/workflows/site-probe.yml 即可自动运行
+#
+# 目标已写死为 47.242.176.36（香港采集机）。换机器改 env.TARGET 两行。
+#
+# 为什么用 GitHub Actions：
+#   ubuntu / windows / macos 三个 runner 分别在 Azure 的不同机房，
+#   天然是不同 ASN，每 30 分钟一轮，产生真实的公网入向 HTTP 流量。
+#   公开仓库完全免费；私有仓库每月 2000 分钟，这个 workflow 一轮不到 1 分钟。
+# =============================================================================
+name: site-probe
+
+on:
+  schedule:
+    # 每 30 分钟一次。GitHub 的高峰期会延迟 5–15 分钟，正常现象。
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: site-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: probe on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    env:
+      TARGET: http://47.242.176.36
+      TARGET_TLS: https://47.242.176.36
+
+    steps:
+      - name: 模拟正常访客
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          UAS=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15"
+            "Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1"
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
+          )
+
+          # 正常页面的访问顺序，像人一样逐个点
+          PATHS=(/ /about /status /docs/ /robots.txt /sitemap.xml)
+
+          echo "runner=$RUNNER_OS target=$TARGET"
+          for path in "${PATHS[@]}"; do
+            ua="${UAS[$((RANDOM % ${#UAS[@]}))]}"
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                   --max-time 20 --connect-timeout 10 \
+                   -A "$ua" -e "$TARGET/" "$TARGET$path" 2>/dev/null || echo "000")
+            echo "$(date -u +%H:%M:%S)  $path  -> $code"
+            # 人工节奏：3–18 秒随机停顿
+            sleep $((RANDOM % 15 + 3))
+          done
+
+          # 一次失败请求（正常用户也会打错地址）
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+                 -A "${UAS[0]}" "$TARGET/no-such-page-$RANDOM" 2>/dev/null || echo "000")
+          echo "404 test -> $code"
+          sleep $((RANDOM % 8 + 2))
+
+          # 一次带表单的 POST（正常登录尝试，蜜罐会记录）
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+                 -A "${UAS[1]}" -X POST -d "u=test&p=test" "$TARGET/admin/login" 2>/dev/null || echo "000")
+          echo "POST /admin/login -> $code"
+          sleep $((RANDOM % 8 + 2))
+
+          # 一次 TLS 握手（自签证书，用 -k 忽略校验）
+          code=$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 15 \
+                 -A "${UAS[2]}" "$TARGET_TLS/" 2>/dev/null || echo "000")
+          echo "TLS / -> $code"
