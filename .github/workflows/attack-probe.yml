@@ -1,0 +1,114 @@
+# =============================================================================
+# 主动攻击注入 · GitHub Actions
+#
+# ⚠️ 目标写死为本项目自己的蜜罐 47.242.176.36。
+#    对其他任何主机发起扫描/爆破都是违法行为，不要改这个地址。
+#
+# 作用：用真实攻击工具（nmap / nikto / gobuster / sqlmap）从 Azure 机房
+#       对自家蜜罐发起扫描与探测，补充被动等待扫描器时捕获不到的攻击类型。
+#
+# 强度刻意压低（-T3、限时、单线程），避免对自家机器造成实际压力。
+# =============================================================================
+name: attack-probe
+
+on:
+  schedule:
+    # 每 2 小时一轮，避开正常探针的整点/半点
+    - cron: "15 */2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: attack-probe
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: red-team-self
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      TARGET: 47.242.176.36
+      SITE: http://47.242.176.36
+
+    steps:
+      - name: 安装工具
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nmap nikto gobuster sqlmap >/dev/null
+          echo "nmap: $(nmap --version | head -1)"
+
+      - name: TCP 全端口扫描
+        continue-on-error: true
+        run: |
+          echo "== 全端口 SYNC 扫描 =="
+          sudo nmap -Pn -sS -T3 --max-retries 1 --host-timeout 240s \
+               -p- --min-rate 800 "$TARGET" | tail -40
+
+      - name: 服务与版本识别
+        continue-on-error: true
+        run: |
+          echo "== 服务识别 =="
+          sudo nmap -Pn -sV -T3 --version-light --host-timeout 180s \
+               -p 21,22,23,25,80,110,143,443,445,1433,3306,3389,5432,5900,6379,8080,8443,9000,11211,27017 \
+               "$TARGET" | tail -45
+
+      - name: Web 漏洞扫描
+        continue-on-error: true
+        run: |
+          echo "== nikto =="
+          nikto -h "$SITE" -maxtime 150s -nointeractive -Tuning 123bde 2>&1 | tail -40
+
+      - name: 目录爆破
+        continue-on-error: true
+        run: |
+          cat > /tmp/words.txt <<'EOF'
+          admin
+          login
+          backup
+          backup.zip
+          config
+          config.php
+          db
+          dump.sql
+          .env
+          .git/config
+          phpinfo.php
+          phpmyadmin
+          console
+          manager/html
+          actuator/env
+          actuator/health
+          server-status
+          wp-login.php
+          wp-admin
+          xmlrpc.php
+          api/v1/token
+          api/v1/users
+          upload
+          uploads
+          test
+          debug
+          shell.php
+          index.php
+          robots.txt
+          sitemap.xml
+          EOF
+          gobuster dir -u "$SITE" -w /tmp/words.txt -t 5 --timeout 10s -q 2>&1 | head -40
+
+      - name: SQL 注入探测
+        continue-on-error: true
+        run: |
+          echo "== sqlmap（低速，只做探测不做利用）=="
+          timeout 120 sqlmap -u "$SITE/index.php?id=1" \
+            --batch --level=1 --risk=1 --threads=1 \
+            --timeout=10 --retries=1 --output-dir=/tmp/sqlmap 2>&1 | tail -25
+
+      - name: SSH 用户名探测
+        continue-on-error: true
+        run: |
+          echo "== SSH banner =="
+          timeout 15 bash -c "exec 3<>/dev/tcp/$TARGET/22 && head -c 100 <&3" 2>/dev/null || echo "无 banner"
+
+      - name: 汇总
+        run: echo "本轮攻击注入完成：$(date -u)"
